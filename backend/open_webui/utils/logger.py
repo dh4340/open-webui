@@ -1,21 +1,49 @@
 import json
 import logging
 import sys
+import sqlite3
 from typing import TYPE_CHECKING
-
 from loguru import logger
-
 from open_webui.env import (
     AUDIT_LOG_FILE_ROTATION_SIZE,
     AUDIT_LOG_LEVEL,
     AUDIT_LOGS_FILE_PATH,
     GLOBAL_LOG_LEVEL,
+    FILE_LOGGING_ENABLED,
+    FILE_LOG_PATH,
 )
-
 
 if TYPE_CHECKING:
     from loguru import Record
 
+class SQLSink:
+    def __init__(self, db_path):
+        self.conn = sqlite3.connect(db_path)
+        self._create_table()
+
+    def _create_table(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                level TEXT,
+                message TEXT
+            )
+        ''')
+        self.conn.commit()
+
+    def write(self, message):
+        record = message.record
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO logs (timestamp, level, message)
+            VALUES (?, ?, ?)
+        ''', (record["time"].strftime("%Y-%m-%d %H:%M:%S"), record["level"].name, record["message"]))
+        self.conn.commit()
+
+    def stop(self):
+        self.conn.close()
 
 def stdout_format(record: "Record") -> str:
     """
@@ -35,13 +63,11 @@ def stdout_format(record: "Record") -> str:
         "\n{exception}"
     )
 
-
 class InterceptHandler(logging.Handler):
     """
     Intercepts log records from Python's standard logging module
     and redirects them to Loguru's logger.
     """
-
     def emit(self, record):
         """
         Called by the standard logging module for each log event.
@@ -62,7 +88,6 @@ class InterceptHandler(logging.Handler):
             level, record.getMessage()
         )
 
-
 def file_format(record: "Record"):
     """
     Formats audit log records into a structured JSON string for file output.
@@ -72,7 +97,6 @@ def file_format(record: "Record"):
     Returns:
     str: A JSON-formatted string representing the audit data.
     """
-
     audit_data = {
         "id": record["extra"].get("id", ""),
         "timestamp": int(record["time"].timestamp()),
@@ -91,7 +115,6 @@ def file_format(record: "Record"):
     record["extra"]["file_extra"] = json.dumps(audit_data, default=str)
     return "{extra[file_extra]}\n"
 
-
 def start_logger():
     """
     Initializes and configures Loguru's logger with distinct handlers:
@@ -104,13 +127,21 @@ def start_logger():
     enable_audit_logging (bool): Determines whether audit-specific log entries should be recorded to file.
     """
     logger.remove()
+    logger.add(sys.stdout, level=GLOBAL_LOG_LEVEL, format=stdout_format,
+               filter=lambda record: "auditable" not in record["extra"])
 
-    logger.add(
-        sys.stdout,
-        level=GLOBAL_LOG_LEVEL,
-        format=stdout_format,
-        filter=lambda record: "auditable" not in record["extra"],
-    )
+    if FILE_LOGGING_ENABLED:
+        try:
+            logger.add(
+                FILE_LOG_PATH,
+                level=GLOBAL_LOG_LEVEL,
+                format=stdout_format,
+                rotation="10 MB",
+                compression="zip",
+            )
+            logger.info(f"File logging enabled. Writing logs to {FILE_LOG_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to initialize file log handler: {str(e)}")
 
     if AUDIT_LOG_LEVEL != "NONE":
         try:
@@ -125,9 +156,11 @@ def start_logger():
         except Exception as e:
             logger.error(f"Failed to initialize audit log file handler: {str(e)}")
 
-    logging.basicConfig(
-        handlers=[InterceptHandler()], level=GLOBAL_LOG_LEVEL, force=True
-    )
+    # Add SQL sink
+    sql_sink = SQLSink("logs.db")
+    logger.add(sql_sink, level="INFO")
+
+    logging.basicConfig(handlers=[InterceptHandler()], level=GLOBAL_LOG_LEVEL, force=True)
     for uvicorn_logger_name in ["uvicorn", "uvicorn.error"]:
         uvicorn_logger = logging.getLogger(uvicorn_logger_name)
         uvicorn_logger.setLevel(GLOBAL_LOG_LEVEL)
@@ -137,4 +170,4 @@ def start_logger():
         uvicorn_logger.setLevel(GLOBAL_LOG_LEVEL)
         uvicorn_logger.handlers = [InterceptHandler()]
 
-    logger.info(f"GLOBAL_LOG_LEVEL: {GLOBAL_LOG_LEVEL}")
+    logger.info(f"GLOBAL_LOG_LEVEL: {GLOBAL_LOG_LEVEL}")  

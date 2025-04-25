@@ -74,6 +74,10 @@ else:
 log = logging.getLogger(__name__)
 log.info(f"GLOBAL_LOG_LEVEL: {GLOBAL_LOG_LEVEL}")
 
+# Optional file-based logging
+FILE_LOGGING_ENABLED = os.environ.get("ENABLE_FILE_LOGGING", "false").lower() == "true"
+FILE_LOG_PATH = os.environ.get("LOG_FILE_PATH", "application.log")
+
 if "cuda_error" in locals():
     log.exception(cuda_error)
     del cuda_error
